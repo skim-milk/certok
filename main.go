@@ -5,13 +5,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 	"sync"
-	"text/tabwriter"
 	"time"
 
 	"github.com/genuinetools/certok/version"
@@ -106,7 +106,7 @@ func main() {
 				if err != nil {
 					logrus.Warn(err)
 				}
-				hosts = append(hosts, host{name: h, certs: certs})
+				hosts = append(hosts, host{Name: h, Certs: certs})
 				wg.Done()
 			}()
 		}
@@ -117,32 +117,22 @@ func main() {
 		// Sort the hosts
 		sort.Sort(hosts)
 
-		// create the writer
-		w := tabwriter.NewWriter(os.Stdout, 20, 1, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tSUBJECT\tISSUER\tALGO\tEXPIRES\tSUNSET DATE\tERROR")
-
 		// Iterate over the hosts
+		certs := []certificate{}
 		for i := 0; i < len(hosts); i++ {
-			for _, cert := range hosts[i].certs {
-				sunset := ""
-				if cert.sunset != nil {
-					sunset = cert.sunset.date.Format("Jan 02, 2006")
+			for _, cert := range hosts[i].Certs {
 
-				}
-				expires := cert.expires
-				if cert.warn {
-					expires = colorstring.Color("[red]" + cert.expires + "[reset]")
-				}
-				error := cert.error
+				error := cert.Error
 				if error != "" {
-					error = colorstring.Color("[red]" + cert.error + "[reset]")
+					error = colorstring.Color("[red]" + cert.Error + "[reset]")
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", cert.name, cert.subject, cert.issuer, cert.algo, expires, sunset, error)
-			}
-		}
 
-		// flush the writer
-		w.Flush()
+				certs = append(certs, cert)
+
+			}
+			jcerts, _ := json.Marshal(certs)
+			fmt.Print(string(jcerts))
+		}
 
 		return nil
 	}
@@ -154,23 +144,23 @@ func main() {
 type hosts []host
 
 func (h hosts) Len() int           { return len(h) }
-func (h hosts) Less(i, j int) bool { return h[i].name < h[j].name }
+func (h hosts) Less(i, j int) bool { return h[i].Name < h[j].Name }
 func (h hosts) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 
 type host struct {
-	name  string
-	certs map[string]certificate
+	Name  string
+	Certs map[string]certificate
 }
 
 type certificate struct {
-	name    string
-	subject string
-	algo    string
-	issuer  string
-	expires string
-	warn    bool
-	error   string
-	sunset  *sunsetSignatureAlgorithm
+	Name    string                    `json:"name"`
+	Subject string                    `json:"subject"`
+	Algo    string                    `json:"algorithm"`
+	Issuer  string                    `json:"issuer"`
+	Expires string                    `json:"expires"`
+	Warn    bool                      `json:"warn"`
+	Error   string                    `json:"error"`
+	Sunset  *sunsetSignatureAlgorithm `json:"sunset"`
 }
 
 func checkHost(h string, twarn time.Time) (map[string]certificate, error) {
@@ -183,19 +173,19 @@ func checkHost(h string, twarn time.Time) (map[string]certificate, error) {
 		switch cerr := err.(type) {
 		case x509.CertificateInvalidError:
 			ht := createHost(h, twarn, cerr.Cert)
-			ht.error = err.Error()
+			ht.Error = err.Error()
 			return map[string]certificate{
 				string(cerr.Cert.Signature): ht,
 			}, nil
 		case x509.UnknownAuthorityError:
 			ht := createHost(h, twarn, cerr.Cert)
-			ht.error = err.Error()
+			ht.Error = err.Error()
 			return map[string]certificate{
 				string(cerr.Cert.Signature): ht,
 			}, nil
 		case x509.HostnameError:
 			ht := createHost(h, twarn, cerr.Certificate)
-			ht.error = err.Error()
+			ht.Error = err.Error()
 			return map[string]certificate{
 				string(cerr.Certificate.Signature): ht,
 			}, nil
@@ -225,29 +215,31 @@ func checkHost(h string, twarn time.Time) (map[string]certificate, error) {
 
 func createHost(name string, twarn time.Time, cert *x509.Certificate) certificate {
 	host := certificate{
-		name:    name,
-		subject: cert.Subject.CommonName,
-		issuer:  cert.Issuer.CommonName,
-		algo:    cert.SignatureAlgorithm.String(),
+		Name:    name,
+		Subject: cert.Subject.CommonName,
+		Issuer:  cert.Issuer.CommonName,
+		Algo:    cert.SignatureAlgorithm.String(),
 	}
 
 	// check the expiration
 	if twarn.After(cert.NotAfter) {
-		host.warn = true
+		host.Warn = true
 	}
-	expiresIn := int64(time.Until(cert.NotAfter).Hours())
-	if expiresIn <= 48 {
-		host.expires = fmt.Sprintf("%d hours", expiresIn)
-	} else {
-		host.expires = fmt.Sprintf("%d days", expiresIn/24)
-	}
+	//expiresIn := int64(time.Until(cert.NotAfter).Hours())
+	// expiresIn := int64((cert.NotAfter))
+	host.Expires = cert.NotAfter.Format("2006-01-02T15:04:05Z")
+	// if expiresIn <= 48 {
+	// 	host.expires = fmt.Sprintf("%d hours", expiresIn)
+	// } else {
+	// 	host.expires = fmt.Sprintf("%d days", expiresIn/24)
+	// }
 
 	// Check the signature algorithm, ignoring the root certificate.
 	if alg, exists := sunsetSignatureAlgorithms[cert.SignatureAlgorithm]; exists {
 		if cert.NotAfter.Equal(alg.date) || cert.NotAfter.After(alg.date) {
-			host.warn = true
+			host.Warn = true
 		}
-		host.sunset = &alg
+		host.Sunset = &alg
 	}
 
 	return host
